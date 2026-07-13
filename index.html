@@ -241,7 +241,7 @@ function haptic(){try{navigator.vibrate&&navigator.vibrate(12)}catch(e){}}
 const AI_DEFAULT={key:'sk-bf-6277a6c8-732a-438b-b7c4-530f2d07e911',endpoint:'https://gateway-buildathon.ltl.sh/v1/chat/completions',model:'gpt-4o',fallbackModel:'gpt-5.5'};
 
 /* ---------- admin analytics (PostHog) ---------- */
-const PH_KEY='__PASTE_POSTHOG_KEY__'; // project API key (phc_...) — analytics silently disabled until set
+const PH_KEY='phc_vqVwSqbQKEEy9drNzw39LdpuNRqZbUxZccHSFPDoudCE'; // PostHog project API key
 const PH_HOST='https://us.i.posthog.com';
 let PH=null;
 function track(ev,props){try{PH&&PH.capture(ev,props||{})}catch(e){}}
