@@ -256,7 +256,7 @@ function initAnalytics(){
   if(!/^phc_/.test(PH_KEY))return;
   try{
     const sc=document.createElement('script');
-    sc.src=PH_HOST+'/static/array.js';sc.async=true;
+    sc.src=PH_HOST.replace('.i.posthog.com','-assets.i.posthog.com')+'/static/array.js';sc.async=true;
     sc.onload=()=>{try{
       window.posthog.init(PH_KEY,{api_host:PH_HOST,autocapture:true,capture_pageview:true,
         session_recording:{maskAllInputs:false,maskInputOptions:{password:true}},
