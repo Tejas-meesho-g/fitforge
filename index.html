@@ -1531,7 +1531,7 @@ function openSettings(){
       </div>
     </details>
     <details class="adv"><summary>🤖 AI settings (bifrost gateway)</summary>
-      <div class="field" style="margin-top:10px"><label>API key</label><input id="st_key" class="ph-no-capture" value="${esc(S.ai.key)}"></div>
+      <div class="field" style="margin-top:10px"><label>API key ${S.ai.key?'<span class="green">(configured ✓)</span>':''}</label><input type="password" id="st_key" class="ph-no-capture" value="" placeholder="${S.ai.key?'hidden — paste a new key to replace':'paste API key'}" autocomplete="new-password"></div>
       <div class="field"><label>Endpoint</label><input id="st_ep" value="${esc(S.ai.endpoint)}"></div>
       <div class="field"><label>Model</label><select id="st_model"><option ${S.ai.model==='gpt-4o'?'selected':''}>gpt-4o</option><option ${S.ai.model==='gpt-5.5'?'selected':''}>gpt-5.5</option></select></div>
       <button class="btn sec sm2" id="st_test">Test connection</button><span id="st_testout" class="sm mut" style="margin-left:8px"></span>
@@ -1562,7 +1562,7 @@ function openSettings(){
   w.querySelector('#st_test').onclick=async()=>{
     const o=w.querySelector('#st_testout');o.textContent='testing…';
     const bak={...S.ai};
-    S.ai={key:w.querySelector('#st_key').value.trim(),endpoint:w.querySelector('#st_ep').value.trim(),model:w.querySelector('#st_model').value};
+    S.ai={key:w.querySelector('#st_key').value.trim()||S.ai.key,endpoint:w.querySelector('#st_ep').value.trim(),model:w.querySelector('#st_model').value};
     try{await aiCall([{role:'user',content:'Reply with exactly: OK'}],{maxTokens:5});o.textContent='✅ working';o.style.color='var(--green)'}
     catch(e){o.textContent='❌ '+(e.message||'failed');o.style.color='var(--red)'}
     finally{S.ai=bak}
@@ -1577,7 +1577,7 @@ function openSettings(){
     p.micros=w.querySelector('#st_micros').checked;
     S.reminders={enabled:w.querySelector('#st_rem').checked,time:w.querySelector('#st_remt').value||'20:00'};
     if(S.reminders.enabled&&typeof Notification!=='undefined'&&Notification.permission==='default')Notification.requestPermission();
-    S.ai={key:w.querySelector('#st_key').value.trim(),endpoint:w.querySelector('#st_ep').value.trim(),model:w.querySelector('#st_model').value};
+    S.ai={key:w.querySelector('#st_key').value.trim()||S.ai.key,endpoint:w.querySelector('#st_ep').value.trim(),model:w.querySelector('#st_model').value};
     save();closeSheets();render();toast('Saved ✓');
   };
 }
