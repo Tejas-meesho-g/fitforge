@@ -240,6 +240,33 @@ function haptic(){try{navigator.vibrate&&navigator.vibrate(12)}catch(e){}}
 /* ---------- constants ---------- */
 const AI_DEFAULT={key:'sk-bf-6277a6c8-732a-438b-b7c4-530f2d07e911',endpoint:'https://gateway-buildathon.ltl.sh/v1/chat/completions',model:'gpt-4o',fallbackModel:'gpt-5.5'};
 
+/* ---------- admin analytics (PostHog) ---------- */
+const PH_KEY='__PASTE_POSTHOG_KEY__'; // project API key (phc_...) — analytics silently disabled until set
+const PH_HOST='https://us.i.posthog.com';
+let PH=null;
+function track(ev,props){try{PH&&PH.capture(ev,props||{})}catch(e){}}
+function phIdentify(){
+  try{
+    if(!PH)return;
+    if(!S.uidv){S.uidv='u_'+uid()+uid();save()}
+    PH.identify(S.uidv,{name:S.profile.name||'(no name)',goal:S.profile.goal,streak_goal:S.profile.streakGoal,level:streakInfo().level,habits:activeHabits().length,onboarded:!!S.onboarded});
+  }catch(e){}
+}
+function initAnalytics(){
+  if(!/^phc_/.test(PH_KEY))return;
+  try{
+    const sc=document.createElement('script');
+    sc.src=PH_HOST+'/static/array.js';sc.async=true;
+    sc.onload=()=>{try{
+      window.posthog.init(PH_KEY,{api_host:PH_HOST,autocapture:true,capture_pageview:true,
+        session_recording:{maskAllInputs:false,maskInputOptions:{password:true}},
+        loaded:()=>{PH=window.posthog;phIdentify();track('app_opened',{level:streakInfo().level,habits:activeHabits().length})}});
+    }catch(e){}};
+    document.head.appendChild(sc);
+  }catch(e){}
+}
+window.addEventListener('error',e=>track('js_error',{msg:String(e&&e.message).slice(0,200),line:e&&e.lineno}));
+
 const LEVELS=[
  [0,'🥚','Egg','Everyone starts somewhere'],
  [1,'🐣','Hatchling','You showed up!'],
@@ -358,7 +385,7 @@ async function syncCreate(){
   const key=uid()+uid()+uid();const body=JSON.stringify(S);
   let lastErr;
   for(const p of ['ec','jb']){
-    try{const id=await SYNC_PROVIDERS[p].create(key,body);S.sync={p,id,key,last:Date.now()};save();return syncCode()}
+    try{const id=await SYNC_PROVIDERS[p].create(key,body);S.sync={p,id,key,last:Date.now()};save();track('sync_enabled',{provider:p});return syncCode()}
     catch(e){lastErr=e}
   }
   throw lastErr||new Error('backup services unreachable');
@@ -669,23 +696,29 @@ function localParseMeal(text){
 }
 
 /* ---------- AI layer (bifrost gateway, with model + local fallbacks) ---------- */
+/* AI provider chain: user's gateway (gpt-4o → gpt-5.5) → free keyless LLM (pollinations.ai) → local heuristics */
+const FREE_AI={endpoint:'https://text.pollinations.ai/openai',model:'openai'};
 async function aiCall(messages,{json=false,maxTokens=900,temp=0.4}={}){
-  const models=[S.ai.model,S.ai.model===AI_DEFAULT.model?AI_DEFAULT.fallbackModel:AI_DEFAULT.model];
+  const attempts=[
+    {url:S.ai.endpoint,model:S.ai.model,key:S.ai.key,name:'gateway/'+S.ai.model},
+    {url:S.ai.endpoint,model:S.ai.model===AI_DEFAULT.model?AI_DEFAULT.fallbackModel:AI_DEFAULT.model,key:S.ai.key,name:'gateway/fallback'},
+    {url:FREE_AI.endpoint,model:FREE_AI.model,key:null,name:'free/pollinations'}
+  ];
   let lastErr;
-  for(const model of models){
+  for(const a of attempts){
     try{
       const ctrl=new AbortController();const to=setTimeout(()=>ctrl.abort(),45000);
-      const r=await fetch(S.ai.endpoint,{method:'POST',signal:ctrl.signal,
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+S.ai.key},
-        body:JSON.stringify({model,messages,max_tokens:maxTokens,temperature:temp})});
+      const headers={'Content-Type':'application/json'};if(a.key)headers['Authorization']='Bearer '+a.key;
+      const r=await fetch(a.url,{method:'POST',signal:ctrl.signal,headers,
+        body:JSON.stringify({model:a.model,messages,max_tokens:maxTokens,temperature:temp})});
       clearTimeout(to);
       if(!r.ok)throw new Error('HTTP '+r.status);
       const j=await r.json();
       let txt=j.choices?.[0]?.message?.content;
       if(!txt)throw new Error('empty response');
-      if(json){txt=txt.replace(/```json|```/g,'').trim();const a=txt.indexOf('{'),b=txt.lastIndexOf('}');if(a>=0)txt=txt.slice(a,b+1);return JSON.parse(txt)}
+      if(json){txt=txt.replace(/```json|```/g,'').trim();const s=txt.indexOf('{'),e2=txt.lastIndexOf('}');if(s>=0)txt=txt.slice(s,e2+1);return JSON.parse(txt)}
       return txt.trim();
-    }catch(e){lastErr=e}
+    }catch(e){lastErr=e;track('ai_provider_failed',{provider:a.name,err:String(e.message).slice(0,100)})}
   }
   throw lastErr||new Error('AI unavailable');
 }
@@ -729,7 +762,7 @@ async function aiPlan(){
 /* ================= UI ================= */
 let VIEW='home', trainDate=todayKey(), foodDate=todayKey(), calCursor=new Date(), learnQ='', learnM='', learnLimit=30, coachHistory=[];
 
-function setView(v){VIEW=v;$$('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));$$('.view').forEach(el=>el.classList.toggle('on',el.id==='view-'+v));render();window.scrollTo({top:0})}
+function setView(v){VIEW=v;$$('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));$$('.view').forEach(el=>el.classList.toggle('on',el.id==='view-'+v));render();window.scrollTo({top:0});track('screen_view',{screen:v})}
 $$('#nav button').forEach(b=>b.onclick=()=>{haptic();setView(b.dataset.v)});
 $('#btnsettings').onclick=()=>openSettings();
 $('#btncoach').onclick=()=>openCoach();
@@ -852,8 +885,9 @@ function renderHome(){
 }
 async function getAIPlan(){
   const b=$('#aiplanbtn'),out=$('#aiplanout');b.disabled=true;b.innerHTML='<span class="spin"></span> Thinking…';
+  track('ai_plan_requested');
   try{const txt=await aiPlan();out.innerHTML=`<div class="bubble">${esc(txt)}</div>`}
-  catch(e){const s=trainSuggestion();out.innerHTML=`<div class="bubble">⚠️ AI is offline — local coach says:\n\n${esc(s.title)}\n${esc(s.detail)}\nAim for 4–6 exercises, 3 sets each, 6–12 reps.</div>`}
+  catch(e){const s=trainSuggestion();out.innerHTML=`<div class="bubble">⚠️ AI is offline — local coach says:\n\n${esc(s.title)}\n${esc(s.detail)}\nAim for 4–6 exercises, 3 sets each, 6–12 reps.</div>`;track('ai_failed',{feature:'plan',err:String(e.message).slice(0,120)})}
   b.disabled=false;b.textContent='✨ AI plan';
 }
 
@@ -918,6 +952,7 @@ function addActivity(i){
   w.querySelector('#actsave').onclick=()=>{
     const m=+w.querySelector('#actmins').value||0;if(m<=0)return toast('Enter minutes');
     day(trainDate).acts.push({name,icon,met,mins:m,kcal:actKcal(met,m,S.profile.weightKg)});
+    track('activity_logged',{activity:name,mins:m});
     save();closeSheets();render();toast(`${icon} ${name} added — nice!`);haptic();
   };
 }
@@ -1007,6 +1042,7 @@ function openSetEditor(id,editRef){
     if(!clean.length)return toast('Add at least one set with reps');
     const entry={id:e.id,name:e.name,muscles:e.primaryMuscles,sec:e.secondaryMuscles,sets:clean,ts:Date.now()};
     if(editRef)day(editRef.k).ex[editRef.i]=entry;else day(trainDate).ex.push(entry);
+    track('workout_logged',{exercise:e.name,sets:clean.length,edit:!!editRef});
     save();closeSheets();render();haptic();
     toast(editRef?'Updated ✓':'Logged ✓ Keep forging 🔥');
   };
@@ -1075,7 +1111,7 @@ function toggleHabit(id){
     toast(hrs>=7?`😴 ${hrs}h — recovery on point ✓`:hrs>0?`Logged ${hrs}h — aim for 7–8h tonight`:'Logged');
   }else{
     const done=hval(t,id)===1;setHval(t,id,done?0:1);
-    if(!done){toast(h.icon+' '+h.name+' ✓');haptic()}
+    if(!done){toast(h.icon+' '+h.name+' ✓');haptic();track('habit_checked',{habit:h.name})}
   }
   render();
 }
@@ -1083,7 +1119,7 @@ function markClean(id){const t=todayKey();setHval(t,id,hval(t,id)===1?0:1);hapti
 function markSlip(id){
   const h=S.habits.find(x=>x.id===id);if(!h)return;
   if(!confirm(`Log a slip on “${h.name}”? Your clean streak resets to 0 — honesty is what makes this work.`))return;
-  setHval(todayKey(),id,-1);render();toast('Day 0 is where every comeback starts 💪',3000);
+  setHval(todayKey(),id,-1);track('habit_slip',{habit:h.name});render();toast('Day 0 is where every comeback starts 💪',3000);
 }
 function openAddHabit(){
   const existing=new Set(activeHabits().map(h=>h.name));
@@ -1109,10 +1145,11 @@ function openAddHabit(){
   w.querySelector('#nh_save').onclick=()=>{
     const name=w.querySelector('#nh_name').value.trim();if(!name)return toast('Give it a name');
     S.habits.push({id:'h_'+uid(),icon:w.querySelector('#nh_icon').value.trim()||'⭐',name,type:w.querySelector('#nh_type').value,freq:+w.querySelector('#nh_freq').value,weight:+w.querySelector('#nh_w').value,cat:w.querySelector('#nh_cat').value,created:todayKey(),archived:false});
+    track('habit_added',{habit:name,type:w.querySelector('#nh_type').value,custom:true});
     save();closeSheets();render();toast('Added 🎯 Counts toward level-ups from next week');
   };
 }
-function addPreset(i){S.habits.push(presetToHabit(PRESET_HABITS[i]));save();closeSheets();render();toast(PRESET_HABITS[i][0]+' added 🎯')}
+function addPreset(i){S.habits.push(presetToHabit(PRESET_HABITS[i]));track('habit_added',{habit:PRESET_HABITS[i][1],type:PRESET_HABITS[i][2],custom:false});save();closeSheets();render();toast(PRESET_HABITS[i][0]+' added 🎯')}
 function editHabit(id){
   const h=S.habits.find(x=>x.id===id);if(!h)return;
   const w=openSheet(`<div class="shead"><h2 style="font-size:17px">${h.icon} Edit habit</h2></div>
@@ -1196,7 +1233,7 @@ async function analyzeMeal(){
   const b=$('#mealai');b.disabled=true;b.innerHTML='<span class="spin"></span> Analyzing…';
   let items,note='',viaAI=true;
   try{const r=await aiParseMeal(txt);items=r.items;note=r.note}
-  catch(e){viaAI=false;items=localParseMeal(txt);note='AI offline — used built-in Indian food table.'}
+  catch(e){viaAI=false;items=localParseMeal(txt);note='AI offline — used built-in Indian food table.';track('ai_failed',{feature:'meal_parse',err:String(e.message).slice(0,120)})}
   b.disabled=false;b.textContent='✨ Analyze & add';
   if(!items.length)return toast('Could not parse that — try simpler wording');
   const tot=items.reduce((a,m)=>a+m.kcal,0);
@@ -1210,6 +1247,7 @@ async function analyzeMeal(){
    </div>`);
   w.querySelector('#mealadd').onclick=()=>{
     for(const m of items)day(foodDate).meals.push({...m,ts:Date.now()});
+    track('meal_logged',{items:items.length,kcal:tot,via:viaAI?'ai':'local'});
     save();$('#mealtext').value='';closeSheets();render();toast('Meal logged 🍽️');haptic();
   };
 }
@@ -1236,6 +1274,7 @@ function customFood(){
 }
 async function getVerdict(){
   const b=$('#verdictbtn'),out=$('#verdictout');b.disabled=true;b.innerHTML='<span class="spin"></span> Coach is reviewing…';
+  track('verdict_requested');
   try{out.innerHTML=`<div class="bubble">${esc(await aiDayVerdict(foodDate))}</div>`}
   catch(e){
     const tt=dayTotals(foodDate),tg=targets();
@@ -1270,6 +1309,7 @@ function renderLearn(){
 function setLearnM(m){learnM=m;learnLimit=30;render()}
 function openExDetail(id){
   const e=exById(id);if(!e)return;
+  track('learn_viewed',{exercise:e.name});
   const i0=exImg(e,0),i1=exImg(e,1);
   openSheet(`<div class="shead"><h2 style="font-size:18px">${esc(e.name)}</h2>
     <div class="row" style="gap:6px;margin-top:6px;flex-wrap:wrap">
@@ -1426,8 +1466,9 @@ function openCoach(){
     coachHistory.push({role:'user',content:q});
     log.innerHTML+=`<div class="bubble" style="background:rgba(255,122,26,.12);border-color:rgba(255,122,26,.3)">${esc(q)}</div><div class="bubble" id="pend"><span class="spin"></span> thinking…</div>`;
     log.parentElement.scrollTop=1e6;
+    track('coach_asked');
     let a;try{a=await aiCoach(q,coachHistory.slice(0,-1))}
-    catch(e){const s=trainSuggestion();a=`⚠️ AI is unreachable right now. Local coach: ${s.title} — ${s.detail} (Check your API key in ⚙️ Settings, or try again later.)`}
+    catch(e){const s=trainSuggestion();a=`⚠️ AI is unreachable right now. Local coach: ${s.title} — ${s.detail} (Check your API key in ⚙️ Settings, or try again later.)`;track('ai_failed',{feature:'coach',err:String(e.message).slice(0,120)})}
     coachHistory.push({role:'assistant',content:a});
     const p=w.querySelector('#pend');if(p){p.id='';p.innerHTML=esc(a)}
     log.parentElement.scrollTop=1e6;
@@ -1475,7 +1516,7 @@ function openSettings(){
         <div class="sm b green">✅ Cloud backup is ON</div>
         <div class="xs mut" style="margin:6px 0">Every change auto-syncs. Last: ${S.sync.last?new Date(S.sync.last).toLocaleString():'—'}</div>
         <div class="field"><label>Your sync code (keep it private — it's your data key)</label>
-          <input readonly value="${esc(syncCode())}" onclick="this.select()" style="font-size:12px"></div>
+          <input readonly class="ph-no-capture" value="${esc(syncCode())}" onclick="this.select()" style="font-size:12px"></div>
         <div class="row">
           <button class="btn sec sm2" id="sy_copy">📋 Copy code</button>
           <button class="btn sec sm2" id="sy_now">Sync now</button>
@@ -1485,12 +1526,12 @@ function openSettings(){
         <div class="xs mut" style="margin-bottom:10px;line-height:1.5">Your data always lives on this device. Enable cloud backup to also auto-save every change online — you get a private sync code to restore on any phone/browser, so nothing is ever forgotten.</div>
         <button class="btn sm2" id="sy_on">☁️ Enable cloud backup</button>`}
         <div class="field" style="margin-top:12px"><label>Restore from a sync code</label>
-          <div class="row"><input id="sy_code" placeholder="paste sync code…"><button class="btn sec sm2" id="sy_restore">Restore</button></div></div>
+          <div class="row"><input id="sy_code" class="ph-no-capture" placeholder="paste sync code…"><button class="btn sec sm2" id="sy_restore">Restore</button></div></div>
         <div id="sy_msg" class="xs mut" style="margin-top:6px"></div>
       </div>
     </details>
     <details class="adv"><summary>🤖 AI settings (bifrost gateway)</summary>
-      <div class="field" style="margin-top:10px"><label>API key</label><input id="st_key" value="${esc(S.ai.key)}"></div>
+      <div class="field" style="margin-top:10px"><label>API key</label><input id="st_key" class="ph-no-capture" value="${esc(S.ai.key)}"></div>
       <div class="field"><label>Endpoint</label><input id="st_ep" value="${esc(S.ai.endpoint)}"></div>
       <div class="field"><label>Model</label><select id="st_model"><option ${S.ai.model==='gpt-4o'?'selected':''}>gpt-4o</option><option ${S.ai.model==='gpt-5.5'?'selected':''}>gpt-5.5</option></select></div>
       <button class="btn sec sm2" id="st_test">Test connection</button><span id="st_testout" class="sm mut" style="margin-left:8px"></span>
@@ -1558,7 +1599,8 @@ function resetAll(){if(confirm('Delete ALL FitForge data? This cannot be undone.
 function openOnboarding(){
   let step=0;const data={name:'',sex:'m',age:25,heightCm:172,weightKg:70,goal:'aesthetic',activity:1.375,streakGoal:4};
   const w=openSheet(`<div class="shead"><h2 style="font-size:18px">Welcome to Fit<span class="acc">Forge</span> 🔥</h2>
-    <div class="sm mut" style="margin-top:3px">30 seconds of setup, then we lift.</div></div>
+    <div class="sm mut" style="margin-top:3px">30 seconds of setup, then we lift.</div>
+    <div class="xs dim" style="margin-top:4px">Anonymous-ish usage analytics help improve the app — your logs stay on your device.</div></div>
    <div class="sbody">
     <div class="obstep on" data-s="0">
       <div class="field"><label>What should we call you?</label><input id="ob_name" placeholder="Your name"></div>
@@ -1609,7 +1651,9 @@ function openOnboarding(){
       Object.assign(S.profile,data);S.onboarded=true;S.weights.push({d:todayKey(),kg:data.weightKg});
       w.querySelectorAll('#ob_habits .chip.on').forEach(c=>S.habits.push(presetToHabit(PRESET_HABITS[+c.dataset.i])));
       save();closeSheets();render();
+      track('onboarding_completed',{habits:activeHabits().length,goal:data.goal,streak_goal:data.streakGoal});phIdentify();
       toast(`Let's forge, ${data.name||'champ'} 🔥`);return}
+    track('onboarding_step',{step});
     w.querySelectorAll('.obstep').forEach(el=>el.classList.toggle('on',+el.dataset.s===step));
     w.querySelector('#ob_next').textContent=step===3?'Start forging 🔥':'Continue →';
   };
@@ -1625,9 +1669,10 @@ try{
 
 /* ---------- boot ---------- */
 load();
+initAnalytics();
 loadExDB();
 setView('home');
-if(!S.onboarded)openOnboarding();
+if(!S.onboarded){openOnboarding();track('onboarding_started')}
 bootSyncPull();
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')syncPush()});
 
